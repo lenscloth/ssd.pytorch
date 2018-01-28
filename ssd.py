@@ -35,6 +35,16 @@ class SSD(nn.Module):
 
         # SSD network
         self.vgg = nn.ModuleList(base)
+
+        # Spatial resolver
+        self.spatial1 = nn.ModuleList([nn.ConvTranspose2d(512, 256, 3, stride=1, padding=1),
+                                       nn.MaxUnpool2d(2, stride=2),
+                                       nn.Conv2d(256, 512, 3, stride=2, padding=1)])
+
+        self.spatial2 = nn.ModuleList([nn.ConvTranspose2d(1024, 512, 3, stride=1, padding=1),
+                                       nn.MaxUnpool2d(3, stride=1),
+                                       nn.Conv2d(512, 1024, 3)])
+
         # Layer learns to scale the l2 normalized features from conv4_3
         self.L2Norm = L2Norm(512, 20)
         self.extras = nn.ModuleList(extras)
@@ -68,18 +78,39 @@ class SSD(nn.Module):
         sources = list()
         loc = list()
         conf = list()
+        pool_ind_stack = list()
 
         # apply vgg up to conv4_3 relu
         for k in range(23):
-            x = self.vgg[k](x)
+            if type(self.vgg[k]) is nn.MaxPool2d:
+                x, i = self.vgg[k](x)
+                pool_ind_stack.append(i)
+            else:
+                x = self.vgg[k](x)
 
-        s = self.L2Norm(x)
-        sources.append(s)
+        s1 = x
+        for l in self.spatial1:
+            if type(l) is nn.MaxUnpool2d:
+                s1 = l(s1, pool_ind_stack.pop())
+            else:
+                s1 = l(s1)
+        s1 = self.L2Norm(s1)
+        sources.append(s1)
 
         # apply vgg up to fc7
         for k in range(23, len(self.vgg)):
-            x = self.vgg[k](x)
-        sources.append(x)
+            if type(self.vgg[k]) is nn.MaxPool2d:
+                x, i = self.vgg[k](x)
+                pool_ind_stack.append(i)
+            else:
+                x = self.vgg[k](x)
+        s2 = x
+        for l in self.spatial2:
+            if type(l) is nn.MaxUnpool2d:
+                s2 = l(s2, pool_ind_stack.pop())
+            else:
+                s2 = l(s2)
+        sources.append(s2)
 
         # apply extra layers and cache source layer outputs
         for k, v in enumerate(self.extras):
@@ -125,9 +156,9 @@ def vgg(cfg, i, batch_norm=False):
     in_channels = i
     for v in cfg:
         if v == 'M':
-            layers += [nn.MaxPool2d(kernel_size=2, stride=2)]
+            layers += [nn.MaxPool2d(kernel_size=2, stride=2, return_indices=True)]
         elif v == 'C':
-            layers += [nn.MaxPool2d(kernel_size=2, stride=2, ceil_mode=True)]
+            layers += [nn.MaxPool2d(kernel_size=2, stride=2, ceil_mode=True, return_indices=True)]
         else:
             conv2d = nn.Conv2d(in_channels, v, kernel_size=3, padding=1)
             if batch_norm:
@@ -135,7 +166,7 @@ def vgg(cfg, i, batch_norm=False):
             else:
                 layers += [conv2d, nn.ReLU(inplace=True)]
             in_channels = v
-    pool5 = nn.MaxPool2d(kernel_size=3, stride=1, padding=1)
+    pool5 = nn.MaxPool2d(kernel_size=3, stride=1, padding=1, return_indices=True)
     conv6 = nn.Conv2d(512, 1024, kernel_size=3, padding=6, dilation=6)
     conv7 = nn.Conv2d(1024, 1024, kernel_size=1)
     layers += [pool5, conv6,
